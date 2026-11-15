@@ -127,7 +127,7 @@ async function enqueue(request,env,ctx,account) {
     insert.bind(account.id,item.id,card,item.iv,item.body,expiration,item.to,account.id)));
   const added = envelopes.filter((item,i) => results[i].meta.changes === 1);
   if (notify && env.VAPID_PRIVATE_KEY && env.VAPID_PUBLIC_KEY && added.length) {
-    ctx.waitUntil(sendNotifications(env,account,added).catch(() => {}));
+    ctx.waitUntil(sendNotifications(env,account,added).catch(error => console.warn('Could not prepare message push',error.name)));
   }
   const contacts = [...ids];
   const targets = await env.DB.prepare(`SELECT id FROM accounts WHERE deleted=0 AND id IN (${contacts.map(() => '?').join(',')})`)
@@ -172,47 +172,93 @@ function validEndpoint(value) {
   }
 }
 
+function withoutPadding(value) {
+  return typeof value === 'string' ? value.replace(/=+$/,'') : '';
+}
+
 async function subscribe(request,env,account) {
   const {subscription,language,remove} = await readJson(request,4096);
   if (validEndpoint(remove)) {
-    await env.DB.prepare('DELETE FROM subscriptions WHERE account_id=? AND endpoint=?').bind(account.id,remove).run();
+    await env.DB.prepare('DELETE FROM subscriptions WHERE account_id=? AND endpoint=?')
+      .bind(account.id,remove).run();
     return {ok:true};
   }
-  check(validEndpoint(subscription?.endpoint) && encoded(subscription.keys?.p256dh,87,87) &&
-    encoded(subscription.keys?.auth,22,22),400,'Unsupported push subscription.');
-  const value = JSON.stringify({endpoint:subscription.endpoint,keys:subscription.keys});
-  // One active push subscription per Thready ID.
-  await env.DB.prepare(`INSERT OR REPLACE INTO subscriptions (account_id,endpoint,subscription,language)
-    VALUES (?,?,?,?)`).bind(account.id,subscription.endpoint,value,language === 'he' ? 'he' : 'en').run();
+  const endpoint = subscription?.endpoint;
+  const p256dh = withoutPadding(subscription?.keys?.p256dh);
+  const auth = withoutPadding(subscription?.keys?.auth);
+  check(validEndpoint(endpoint) && encoded(p256dh,87,87) && encoded(auth,22,22),400,'Unsupported push subscription.');
+  const value = JSON.stringify({endpoint,keys:{p256dh,auth}});
+  const lang = language === 'he' ? 'he' : 'en';
+  await env.DB.prepare(`INSERT INTO subscriptions (account_id,endpoint,subscription,language)
+    VALUES (?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET
+    account_id=excluded.account_id,subscription=excluded.subscription,language=excluded.language`)
+    .bind(account.id,endpoint,value,lang).run();
+  return {ok:true};
+}
+
+async function sendPush(env,target,payload) {
+  const details = webpush.generateRequestDetails(JSON.parse(target.subscription),JSON.stringify(payload),{
+    TTL:3600,urgency:'high',vapidDetails:{
+      subject:env.VAPID_SUBJECT,publicKey:env.VAPID_PUBLIC_KEY,privateKey:env.VAPID_PRIVATE_KEY
+    }
+  });
+  const response = await fetch(details.endpoint,{
+    method:'POST',headers:details.headers,body:details.body,redirect:'manual',
+    signal:AbortSignal.timeout(6000)
+  });
+  const status = response.status;
+  await response.body?.cancel();
+  if (status === 404 || status === 410) {
+    // The browser may have renewed its keys while the old provider request was in flight.
+    await env.DB.prepare('DELETE FROM subscriptions WHERE account_id=? AND endpoint=? AND subscription=?')
+      .bind(target.account_id,target.endpoint,target.subscription).run();
+  }
+  return status;
+}
+
+async function testNotification(request,env,account) {
+  check(env.VAPID_PRIVATE_KEY && env.VAPID_PUBLIC_KEY,503,'Notifications are not configured.');
+  const {endpoint} = await readJson(request,3072);
+  check(validEndpoint(endpoint),400,'Unsupported push subscription.');
+  const now = epoch();
+  const target = await env.DB.prepare(`UPDATE subscriptions SET next_test=?
+    WHERE account_id=? AND endpoint=? AND next_test<=?
+    RETURNING account_id,endpoint,subscription,language`).bind(now+15,account.id,endpoint,now).first();
+  if (!target) {
+    const existing = await env.DB.prepare('SELECT 1 FROM subscriptions WHERE account_id=? AND endpoint=?')
+      .bind(account.id,endpoint).first();
+    check(existing,404,'Enable notifications in this browser before testing.');
+    throw new HttpError(429,'Wait 15 seconds before testing again.');
+  }
+  let status;
+  try {
+    status = await sendPush(env,target,{v:1,id:crypto.randomUUID(),lang:target.language,test:true});
+  } catch (error) {
+    console.warn('Could not send test push',error.name);
+    throw new HttpError(502,'The push service could not be reached. Try again.');
+  }
+  check(status !== 404 && status !== 410,410,'Push subscription expired. Enable notifications again.');
+  check(status >= 200 && status < 300,502,'The browser push service rejected the notification.');
   return {ok:true};
 }
 
 async function sendNotifications(env,account,items) {
+  const placeholders = items.map(() => '?').join(',');
+  const ids = items.map(item => item.to);
   const targets = await env.DB.prepare(`SELECT account_id,subscription,endpoint,language FROM subscriptions
-    WHERE account_id IN (${items.map(() => '?').join(',')})`).bind(...items.map(item => item.to)).all();
+    WHERE account_id IN (${placeholders})`).bind(...ids).all();
   const byRecipient = new Map(items.map(item => [item.to,item]));
   for (let offset = 0; offset < targets.results.length; offset += 5) {
-    await Promise.allSettled(targets.results.slice(offset,offset+5).map(async target => {
+    await Promise.all(targets.results.slice(offset,offset+5).map(async target => {
       const item = byRecipient.get(target.account_id);
       const base = {v:1,id:item.id,lang:target.language};
-      const full = JSON.stringify({...base,envelope:{...item,sender:account.card}});
-      const payload = bytes(full).length <= 3800 ? full : JSON.stringify(base);
-      const details = webpush.generateRequestDetails(JSON.parse(target.subscription),payload,{
-        TTL:3600,urgency:'high',vapidDetails:{
-          subject:env.VAPID_SUBJECT,publicKey:env.VAPID_PUBLIC_KEY,privateKey:env.VAPID_PRIVATE_KEY
-        }
-      });
-      const response = await fetch(details.endpoint,{
-        method:'POST',headers:details.headers,body:details.body,redirect:'error',
-        signal:AbortSignal.timeout(6000)
-      });
-      if (response.status === 404 || response.status === 410) {
-        await env.DB.prepare('DELETE FROM subscriptions WHERE account_id=? AND endpoint=?')
-          .bind(target.account_id,target.endpoint).run();
-      } else if (!response.ok) {
-        console.warn('Push provider rejected a request',response.status);
+      const full = {...base,envelope:{...item,sender:account.card}};
+      try {
+        const status = await sendPush(env,target,bytes(JSON.stringify(full)).length <= 3800 ? full : base);
+        if (status < 200 || status >= 300) console.warn('Push provider rejected a request',status);
+      } catch (error) {
+        console.warn('Could not send message push',error.name);
       }
-      await response.body?.cancel();
     }));
   }
 }
@@ -243,6 +289,7 @@ async function route(request,env,ctx) {
     case 'GET /inbox': return inbox(url,env,await authenticate(request,env));
     case 'POST /ack': return acknowledge(request,env,await authenticate(request,env));
     case 'POST /push': return subscribe(request,env,await authenticate(request,env));
+    case 'POST /push/test': return testNotification(request,env,await authenticate(request,env));
     case 'POST /delete': return deleteAccount(env,await authenticate(request,env,true));
     default: throw new HttpError(404,'Unknown endpoint.');
   }

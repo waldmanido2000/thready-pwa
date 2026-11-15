@@ -40,11 +40,13 @@ async function receivePush(event) {
   try { push = event.data?.json(); }
   catch { return; }
   if (push?.v !== 1) return;
-  const label = push.lang === 'he' ? 'הודעה חדשה ב־Thready' : 'New message in Thready';
+  const label = push.test
+    ? (push.lang === 'he' ? 'התראת בדיקה מ־Thready' : 'Thready test notification')
+    : (push.lang === 'he' ? 'הודעה חדשה ב־Thready' : 'New message in Thready');
   const notice = self.registration.showNotification(label,{
     icon:'./icons/thready-192.png',
     tag:'thready-' + push.id,
-    data:{id:push.id}
+    data:{id:push.test ? null : push.id}
   });
   try {
     if (push.envelope) {
