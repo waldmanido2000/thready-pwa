@@ -86,8 +86,10 @@ jobs:
             echo 'One Web Push key is missing. Restore the matching key in Cloudflare before redeploying.' >&2
             exit 1
           fi
-          curl -fsS --retry 4 --retry-all-errors --max-time 15 "$WORKER_URL/" | node -e 'const r = JSON.parse(require("node:fs").readFileSync(0,"utf8")); if (r.service !== "Thready delivery") process.exit(1);'
-          curl -fsS --retry 4 --retry-all-errors --max-time 15 "$WORKER_URL/push-key" | node -e 'const r = JSON.parse(require("node:fs").readFileSync(0,"utf8")); if (typeof r.key !== "string" || !r.key) process.exit(1);'
+          echo 'Waiting for the Worker HTTPS endpoint, including first-time certificate provisioning.'
+          curl -fsS --retry 18 --retry-delay 10 --retry-max-time 185 --retry-all-errors --max-time 10 "$WORKER_URL/" -o "$RUNNER_TEMP/thready-health.json"
+          curl -fsS --retry 6 --retry-delay 5 --retry-all-errors --max-time 10 "$WORKER_URL/push-key" -o "$RUNNER_TEMP/thready-push.json"
+          node -e 'const fs = require("node:fs"); const health = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const push = JSON.parse(fs.readFileSync(process.argv[2], "utf8")); if (health.service !== "Thready delivery" || typeof push.key !== "string" || !push.key) process.exit(1);' "$RUNNER_TEMP/thready-health.json" "$RUNNER_TEMP/thready-push.json"
           node -e 'require("node:fs").writeFileSync("../docs/config.js", "export const RELAY_URL = " + JSON.stringify(process.env.WORKER_URL) + ";\n");'
           npm run build:pwa
       - uses: actions/upload-pages-artifact@v4
