@@ -1,0 +1,15 @@
+{
+  "id": "./",
+  "name": "Thready PWA",
+  "short_name": "Thready",
+  "lang": "he",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#141e29",
+  "theme_color": "#141e29",
+  "icons": [
+    {"src":"icons/thready-192.png","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"icons/thready-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}

@@ -1,0 +1,18 @@
+name = "thready-delivery"
+main = "src/index.js"
+compatibility_date = "2026-11-15"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[vars]
+APP_ORIGIN = "https://YOUR-GITHUB-USERNAME.github.io"
+VAPID_SUBJECT = "mailto:YOUR-EMAIL@example.com"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "thready-delivery"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["17 * * * *"]
