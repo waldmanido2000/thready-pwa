@@ -187,7 +187,10 @@ function asleep(thread) {
   return thread.sleep || data.now - thread.activity >= thread.days * DAY;
 }
 
-function accountName(uid) { const person = people.get(uid); return person && !person.deleted ? person.name : tr('Deleted user'); }
+function accountName(uid) {
+  const person = people.get(uid);
+  return person && !person.deleted ? person.name || tr('Unnamed contact') : tr('Deleted user');
+}
 function groupFor(thread) { return groupsById.get(thread.group); }
 function byMessageUpdate(a,b) {
   return (latestMessage.get(b.id) || 0) - (latestMessage.get(a.id) || 0) || a.title.localeCompare(b.title,language);
@@ -396,10 +399,15 @@ function home() {
   if (saved.length) {
     container.append(el('section',{class:'favorites'},el('h2',{},tr('Favorite threads')),el('div',{class:'list'},saved.map(browse))));
   }
-  container.append(el('div',{class:'list'},live.length ? live.sort(byConversationUpdate).map(browse)
-    : el('div',{class:'empty panel'},tr('Add a contact to start a conversation.'))));
-  if (dormant.length) container.append(el('details',{class:'disclosure'},el('summary',{},tr('Wake up ({count})',{count:dormant.length})),
-    el('div',{class:'list'},dormant.sort(byConversationUpdate).map(browse))));
+  const otherThreads = live.filter(thread => !favorites.has(thread.id)).sort(byConversationUpdate);
+  const otherDormant = dormant.filter(thread => !favorites.has(thread.id)).sort(byConversationUpdate);
+  const section = el('section',{},el('h2',{},tr('Other threads')),
+    el('div',{class:'list'},otherThreads.length ? otherThreads.map(browse)
+      : !otherDormant.length ? el('div',{class:'empty panel'},tr(data.groups.length ? 'No other threads.' : 'Add a contact to start a conversation.')) : null));
+  if (otherDormant.length) section.append(el('details',{class:'disclosure'},
+    el('summary',{},tr('Wake up ({count})',{count:otherDormant.length})),
+    el('div',{class:'list'},otherDormant.map(browse))));
+  container.append(section);
   return container;
 }
 
@@ -411,7 +419,7 @@ function newGroup(preselected = '') {
   }
   const checkboxes = el('div',{class:'dialog-list'},contacts.map(person =>
     el('label',{class:'check'},el('input',{type:'checkbox',value:person.id,checked:person.id === preselected}),
-      el('span',{dir:'auto'},person.name + ' · ' + person.username.slice(0,10)))));
+      el('span',{dir:'auto'},[accountName(person.id),originalContactName(person)].filter(Boolean).join(' · ')))));
   openForm(tr('New conversation'),tr('Open conversation'),[field(tr('Title'),'title',{maxlength:100,dir:'auto'}),checkboxes],
     async fields => {
       const members = [...checkboxes.querySelectorAll(':checked')].map(input => input.value);
@@ -645,8 +653,11 @@ function searchDialog(type) {
     const query = input.value.trim().toLocaleLowerCase();
     const matches = value => value.toLocaleLowerCase().includes(query);
     let results = [];
-    if (type === 'contacts') results = data.people.filter(p => !p.deleted && p.id !== data.me && (matches(p.name) || matches(p.username)))
-      .slice(0,80).map(p => item(p.name,'@' + p.username,() => newGroup(p.id),'@'));
+    if (type === 'contacts') results = data.people
+      .filter(person => !person.deleted && person.id !== data.me &&
+        (matches(accountName(person.id)) || matches(person.originalName)))
+      .slice(0,80).map(person => item(accountName(person.id),originalContactName(person),
+        () => contactDetails(person),accountName(person.id).slice(0,1).toUpperCase()));
     if (type === 'threads') results = data.threads.filter(t => matches(t.title)).sort(byMessageUpdate).slice(0,80)
       .map(t => browseThread(t,ancestors(t).map(n => n.title).join(' › ') + (asleep(t) ? ' · ' + tr('Dormant') : '')));
     if (type === 'text' && query) results = data.messages.filter(m => !m.deleted && matches(m.text)).slice(-80).reverse()
@@ -657,6 +668,22 @@ function searchDialog(type) {
   input.addEventListener('input',refresh);
   refresh();
   input.focus();
+}
+
+function originalContactName(person) {
+  return person.nickname && person.originalName !== person.nickname ? person.originalName : '';
+}
+
+function contactDetails(person) {
+  openForm(accountName(person.id),tr('Save nickname'),[
+    person.originalName ? el('p',{class:'hint',dir:'auto'},tr('Original name: {name}',{name:person.originalName})) : null,
+    field(tr('Nickname on this device'),'nickname',{required:false,maxlength:60,dir:'auto'},person.nickname),
+    button(tr('New conversation'),() => newGroup(person.id),'quiet')
+  ],async fields => {
+    await localActions.renameContact(person.id,fields.nickname);
+    await update(true);
+    searchDialog('contacts');
+  });
 }
 
 async function showInvite() {

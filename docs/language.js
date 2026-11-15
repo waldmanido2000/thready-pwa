@@ -1,6 +1,12 @@
 'use strict';
 
 const hebrew = {
+  'Other threads':'שרשורים נוספים',
+  'No other threads.':'אין שרשורים נוספים.',
+  'Unnamed contact':'איש קשר ללא שם',
+  'Contact unavailable.':'איש הקשר אינו זמין.',
+  'Save nickname':'שמירת כינוי',
+  'Original name: {name}':'השם המקורי: {name}',
   "Connected":"מחובר",
   "Your identity and chat history live on this device.":"הזהות והיסטוריית השיחות נשמרות במכשיר הזה.",
   "Add contact":"הוספת איש קשר",

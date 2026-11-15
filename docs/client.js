@@ -93,6 +93,16 @@ export const localActions = {
     const verified = await checkedCard(card);
     await put('contacts',id,{...verified,localName});
   },
+  async renameContact(id,name) {
+    return serialized(async () => {
+      const {owner,model} = await state();
+      const person = model.people.get(id);
+      if (!person || id === owner.card.id) throw new Error('Contact unavailable.');
+      const localName = name.trim();
+      if (localName.length > 60) throw new Error('Enter a display name.');
+      await put('contacts',id,{id,box:person.box,sign:person.sign,localName});
+    });
+  },
   async snapshot(since) {
     const {owner,model,events,favorites,outbox,failed} = await state();
     const pending = new Set(outbox.map(item => item.id));
@@ -108,7 +118,8 @@ export const localActions = {
     return {...result,me:owner.card.id,groups:[...model.groups.values()],threads:[...model.threads.values()],
       messages:[...model.messages.values()].map(message => ({...message,pending:pending.has(message.id),failed:failures.has(message.id)})),
       people:[...model.people.values()].map(person => ({
-        id:person.id,name:person.localName || person.name || person.id.slice(0,10),username:person.id
+        id:person.id,name:person.localName || person.name || '',
+        originalName:person.name || '',nickname:person.localName || ''
       })),favorites};
   },
   async change(action,fields) {

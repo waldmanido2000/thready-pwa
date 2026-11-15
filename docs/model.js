@@ -123,8 +123,8 @@ export function replay(identity,contacts,events) {
     try {
       apply(model,event,identity.card.id);
       const person = model.people.get(event.author);
-      if (person && !person.localName && event.author !== identity.card.id) {
-        model.people.set(event.author,{...person,name:event.name || person.name});
+      if (person && event.name && event.author !== identity.card.id) {
+        model.people.set(event.author,{...person,name:event.name});
       }
     } catch {
       // A concurrent move can invalidate another action. Replay order is identical on all devices.
