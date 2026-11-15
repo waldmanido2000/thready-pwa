@@ -39,6 +39,22 @@ jobs:
             echo 'Add the CLOUDFLARE_API_TOKEN repository secret and provide a valid Cloudflare Account ID.' >&2
             exit 1
           fi
+          node --input-type=module <<'JS'
+          const endpoint = 'https://api.cloudflare.com/client/v4/accounts/' + process.env.CLOUDFLARE_ACCOUNT_ID + '/workers/subdomain';
+          const headers = { Authorization: 'Bearer ' + process.env.CLOUDFLARE_API_TOKEN };
+          const current = await fetch(endpoint, {headers}).then(r => r.json());
+          if (!current.success) {
+            if (!current.errors?.some(error => error.code === 10007)) {
+              throw new Error('Could not check the Workers subdomain: ' + JSON.stringify(current.errors));
+            }
+            const created = await fetch(endpoint, {
+              method: 'PUT',
+              headers: {...headers, 'Content-Type': 'application/json'},
+              body: JSON.stringify({subdomain: 'thready-waldmanido2000'})
+            }).then(r => r.json());
+            if (!created.success) throw new Error('Could not register the Workers subdomain: ' + JSON.stringify(created.errors));
+          }
+          JS
           db_id() {
             npx wrangler d1 list --json | node --input-type=module -e 'const a = JSON.parse(await new Response(process.stdin).text()); process.stdout.write(a.find(x => x.name === "thready-delivery")?.uuid ?? "")'
           }
