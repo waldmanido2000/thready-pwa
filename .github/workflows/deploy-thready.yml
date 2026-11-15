@@ -1,0 +1,92 @@
+name: Deploy Thready
+on:
+  workflow_dispatch:
+    inputs:
+      cloudflare_account_id:
+        description: Cloudflare Account ID (32 hexadecimal characters)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thready-production
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+        working-directory: worker
+      - name: Deploy relay and prepare the PWA
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
+          CLOUDFLARE_ACCOUNT_ID: '${{ inputs.cloudflare_account_id }}'
+          WRANGLER_SEND_METRICS: 'false'
+          CI: 'true'
+        run: |
+          set -euo pipefail
+          if [[ -z "$CLOUDFLARE_API_TOKEN" || ! "$CLOUDFLARE_ACCOUNT_ID" =~ ^[0-9a-fA-F]{32}$ ]]; then
+            echo 'Add the CLOUDFLARE_API_TOKEN repository secret and provide a valid Cloudflare Account ID.' >&2
+            exit 1
+          fi
+          db_id() {
+            npx wrangler d1 list --json | node --input-type=module -e 'const a = JSON.parse(await new Response(process.stdin).text()); process.stdout.write(a.find(x => x.name === "thready-delivery")?.uuid ?? "")'
+          }
+          D1_ID=$(db_id)
+          if [[ -z "$D1_ID" ]]; then
+            npx wrangler d1 create thready-delivery
+            D1_ID=$(db_id)
+          fi
+          [[ "$D1_ID" =~ ^[0-9a-fA-F-]{36}$ ]]
+          export D1_ID
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const source = readFileSync('wrangler.toml', 'utf8');
+          const config = source
+            .replace(/^APP_ORIGIN = .*$/m, 'APP_ORIGIN = "https://waldmanido2000.github.io"')
+            .replace(/^VAPID_SUBJECT = .*$/m, 'VAPID_SUBJECT = "https://waldmanido2000.github.io/thready-pwa/"')
+            .replace(/^database_id = .*$/m, 'database_id = "' + process.env.D1_ID + '"');
+          writeFileSync('.wrangler-deploy.toml', config);
+          JS
+          npx wrangler d1 migrations apply DB --remote --config .wrangler-deploy.toml
+          npx wrangler deploy --config .wrangler-deploy.toml | tee "$RUNNER_TEMP/thready-deploy.log"
+          WORKER_URL=$(grep -m1 -oE 'https://thready-delivery\.[a-z0-9-]+\.workers\.dev' "$RUNNER_TEMP/thready-deploy.log")
+          export WORKER_URL
+          npx wrangler secret list --format json --config .wrangler-deploy.toml > "$RUNNER_TEMP/thready-secret-names.json"
+          key_count=$(node -e 'const list = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(list.filter(x => ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY"].includes(x.name)).length));' "$RUNNER_TEMP/thready-secret-names.json")
+          if [[ "$key_count" == 0 ]]; then
+            node -e 'const k = require("web-push").generateVAPIDKeys(); process.stdout.write(JSON.stringify({VAPID_PUBLIC_KEY:k.publicKey,VAPID_PRIVATE_KEY:k.privateKey}));' | npx wrangler secret bulk --config .wrangler-deploy.toml
+          elif [[ "$key_count" != 2 ]]; then
+            echo 'One Web Push key is missing. Restore the matching key in Cloudflare before redeploying.' >&2
+            exit 1
+          fi
+          curl -fsS --retry 4 --retry-all-errors --max-time 15 "$WORKER_URL/" | node -e 'const r = JSON.parse(require("node:fs").readFileSync(0,"utf8")); if (r.service !== "Thready delivery") process.exit(1);'
+          curl -fsS --retry 4 --retry-all-errors --max-time 15 "$WORKER_URL/push-key" | node -e 'const r = JSON.parse(require("node:fs").readFileSync(0,"utf8")); if (typeof r.key !== "string" || !r.key) process.exit(1);'
+          node -e 'require("node:fs").writeFileSync("../docs/config.js", "export const RELAY_URL = " + JSON.stringify(process.env.WORKER_URL) + ";\n");'
+          npm run build:pwa
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: '${{ steps.pages.outputs.page_url }}'
+    steps:
+      - id: pages
+        uses: actions/deploy-pages@v4
