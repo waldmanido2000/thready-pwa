@@ -857,15 +857,22 @@ async function notificationSettings() {
   const actions = el('div',{class:'row'});
   modal(tr('Notifications'),el('div',{},notice,actions));
   try {
-    const configure = await localActions.notificationControls();
-    const change = async enable => {
+    const controls = await localActions.notificationControls();
+    const change = async (action,message) => {
+      for (const item of actions.children) item.disabled = true;
       try {
-        await configure(enable);
-        notice.textContent = tr(enable ? 'Notifications enabled.' : 'Notifications disabled.');
-      } catch (error) { notice.textContent = errorText(error.message); }
+        await controls[action]();
+        notice.textContent = tr(message);
+      } catch (error) {
+        notice.textContent = errorText(error.message);
+      } finally {
+        for (const item of actions.children) item.disabled = false;
+      }
     };
-    actions.append(button(tr('Enable notifications'),() => change(true),'primary'),
-      button(tr('Disable notifications'),() => change(false),'quiet'));
+    actions.append(
+      button(tr('Enable notifications'),() => change('enable','Notifications enabled.'),'primary'),
+      button(tr('Test notification'),() => change('test','Test sent. Check this browser’s system notifications.'),'quiet'),
+      button(tr('Disable notifications'),() => change('disable','Notifications disabled.'),'quiet'));
   } catch (error) { notice.textContent = errorText(error.message); }
 }
 

@@ -300,17 +300,31 @@ export const localActions = {
         subscription = null;
       }
     }
-    return async enable => {
-      if (enable) {
+    return {
+      async enable() {
         if (Notification.permission === 'denied') throw new Error('Allow notifications in your device settings.');
         subscription ??= await worker.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:unb64(key)});
         await register(owner);
         await relay('/push',owner,{subscription:subscription.toJSON(),language:document.documentElement.lang});
-      } else if (subscription) {
-        const endpoint = subscription.endpoint;
+      },
+      async disable() {
+        if (!subscription) return;
+        await relay('/push',owner,{remove:subscription.endpoint});
         await subscription.unsubscribe();
         subscription = null;
-        await relay('/push',owner,{remove:endpoint});
+      },
+      async test() {
+        if (Notification.permission !== 'granted' || !subscription) {
+          throw new Error('Enable notifications in this browser before testing.');
+        }
+        try { await relay('/push/test',owner,{endpoint:subscription.endpoint}); }
+        catch (error) {
+          if (error.status === 410) {
+            await subscription.unsubscribe().catch(() => {});
+            subscription = null;
+          }
+          throw error;
+        }
       }
     };
   }

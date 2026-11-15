@@ -1,6 +1,14 @@
 'use strict';
 
 const hebrew = {
+  "Test notification":"בדיקת התראה",
+  "Test sent. Check this browser’s system notifications.":"נשלחה התראת בדיקה. בדקו את התראות המערכת של הדפדפן הזה.",
+  "Enable notifications in this browser before testing.":"יש להפעיל התראות בדפדפן הזה לפני הבדיקה.",
+  "Wait 15 seconds before testing again.":"המתינו 15 שניות לפני בדיקה נוספת.",
+  "The push service could not be reached. Try again.":"לא ניתן להתחבר לשירות ההתראות. נסו שוב.",
+  "Push subscription expired. Enable notifications again.":"הרישום להתראות פג. הפעילו את ההתראות מחדש.",
+  "The browser push service rejected the notification.":"שירות ההתראות של הדפדפן דחה את ההתראה.",
+  "Unsupported push subscription.":"הדפדפן הזה מסר רישום להתראות שאינו נתמך.",
   "Thready ID copied.":"המזהה של Thready הועתק.",
   "Copy ID":"העתקת מזהה",
   "Sign out before signing in again.":"כדי להיכנס שוב, צאו תחילה מהחשבון.",
