@@ -1,5 +1,5 @@
 import webpush from 'web-push';
-import {bytes,digest,isId,isUuid,verifyRegistration} from '../../docs/protocol.js';
+import {b64,bytes,digest,isId,isUuid,verifyRegistration} from '../../docs/protocol.js';
 
 const retain = 30 * 24 * 60 * 60;
 const epoch = () => Math.floor(Date.now()/1000);
@@ -69,11 +69,48 @@ async function register(request,env) {
   }
   const {card,tokenHash} = registration;
   check(card.id === id,400,'Invalid registration.');
-  await env.DB.prepare('INSERT OR IGNORE INTO accounts (id,card,token_hash) VALUES (?,?,?)')
-    .bind(id,JSON.stringify(card),tokenHash).run();
+  const values = [id,JSON.stringify(card),tokenHash];
+  const existing = await env.DB.prepare('SELECT token_hash,deleted FROM accounts WHERE id=?').bind(id).first();
+  if (existing) {
+    check(!existing.deleted && existing.token_hash === tokenHash,409,'This Thready ID cannot register.');
+    return {id};
+  }
+  if (input.invitation !== undefined) {
+    check(isId(input.invitation),400,'Enter a valid invitation link.');
+    const hash = await digest(input.invitation);
+    const [claim] = await env.DB.batch([
+      env.DB.prepare(`UPDATE invitations SET redeemed_by=? WHERE code_hash=? AND expires>?
+        AND redeemed_by IS NULL AND NOT EXISTS (SELECT 1 FROM accounts WHERE id=?)`).bind(id,hash,epoch(),id),
+      env.DB.prepare(`INSERT OR IGNORE INTO accounts (id,card,token_hash)
+        SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM invitations WHERE code_hash=? AND redeemed_by=?)`)
+        .bind(...values,hash,id)
+    ]);
+    if (!claim.meta.changes) {
+      const retry = await env.DB.prepare('SELECT token_hash,deleted FROM accounts WHERE id=?').bind(id).first();
+      check(retry && !retry.deleted && retry.token_hash === tokenHash,403,'This invitation has expired or was already used.');
+    }
+  } else {
+    await env.DB.prepare(`INSERT OR IGNORE INTO accounts (id,card,token_hash)
+      SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM invitation_settings)`).bind(...values).run();
+  }
   const row = await env.DB.prepare('SELECT token_hash,deleted FROM accounts WHERE id=?').bind(id).first();
-  check(row && !row.deleted && row.token_hash === tokenHash,409,'This Thready ID cannot register.');
+  check(row,403,'An invitation is required to create a Thready account.');
+  check(!row.deleted && row.token_hash === tokenHash,409,'This Thready ID cannot register.');
   return {id};
+}
+
+async function invitationAdmin(env) {
+  const settings = await env.DB.prepare('SELECT admin_id FROM invitation_settings WHERE singleton=1').first();
+  return settings?.admin_id;
+}
+
+async function createInvitation(env,account) {
+  check((await invitationAdmin(env)) === account.id,403,'Only the Thready admin can create invitations.');
+  const invitation = b64(crypto.getRandomValues(new Uint8Array(32)));
+  const expires = epoch() + 7 * 86400;
+  await env.DB.prepare('INSERT INTO invitations (code_hash,expires) VALUES (?,?)')
+    .bind(await digest(invitation),expires).run();
+  return {invitation};
 }
 
 async function setSignIn(request,env,account) {
@@ -279,6 +316,12 @@ async function route(request,env,ctx) {
   switch (action) {
     case 'GET /': return {service:'Thready delivery',version:1};
     case 'POST /register': return register(request,env);
+    case 'GET /invitations/status': return {required:Boolean(await invitationAdmin(env))};
+    case 'GET /invitations/admin': {
+      const account = await authenticate(request,env);
+      return {allowed:(await invitationAdmin(env)) === account.id};
+    }
+    case 'POST /invitations': return createInvitation(env,await authenticate(request,env));
     case 'POST /sign-in/setup': return setSignIn(request,env,await authenticate(request,env));
     case 'POST /sign-in': return recoverSignIn(request,env);
     case 'GET /contact': return contact(url,env);
@@ -317,7 +360,10 @@ export default {
     }
   },
   async scheduled(_controller,env) {
-    await env.DB.prepare('DELETE FROM delivery WHERE seq IN (SELECT seq FROM delivery WHERE expires<=? LIMIT 5000)')
-      .bind(epoch()).run();
+    const now = epoch();
+    await env.DB.batch([
+      env.DB.prepare('DELETE FROM delivery WHERE seq IN (SELECT seq FROM delivery WHERE expires<=? LIMIT 5000)').bind(now),
+      env.DB.prepare('DELETE FROM invitations WHERE expires<=?').bind(now)
+    ]);
   }
 };
