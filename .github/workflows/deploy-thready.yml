@@ -31,6 +31,7 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
           CLOUDFLARE_ACCOUNT_ID: '${{ inputs.cloudflare_account_id }}'
+          THREADY_ADMIN_ID: '${{ secrets.THREADY_ADMIN_ID }}'
           WRANGLER_SEND_METRICS: 'false'
           CI: 'true'
         run: |
@@ -76,6 +77,14 @@ jobs:
           JS
           npx wrangler d1 migrations apply DB --remote --config .wrangler-deploy.toml
           npx wrangler deploy --config .wrangler-deploy.toml | tee "$RUNNER_TEMP/thready-deploy.log"
+          if [[ -n "$THREADY_ADMIN_ID" ]]; then
+            if [[ ! "$THREADY_ADMIN_ID" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+              echo 'THREADY_ADMIN_ID must be a full Thready ID.' >&2
+              exit 1
+            fi
+            npx wrangler d1 execute DB --remote --config .wrangler-deploy.toml --command "INSERT INTO invitation_settings (singleton,admin_id) SELECT 1,id FROM accounts WHERE id='$THREADY_ADMIN_ID' AND deleted=0 ON CONFLICT(singleton) DO UPDATE SET admin_id=excluded.admin_id;"
+            npx wrangler d1 execute DB --remote --config .wrangler-deploy.toml --json --command "SELECT COUNT(*) AS configured FROM invitation_settings WHERE singleton=1 AND admin_id='$THREADY_ADMIN_ID';" | node -e 'const result=JSON.parse(require("node:fs").readFileSync(0,"utf8")); if (result[0]?.results?.[0]?.configured !== 1) { console.error("The administrator must already have an active Thready account."); process.exit(1); }'
+          fi
           WORKER_URL=$(grep -m1 -oE 'https://thready-delivery\.[a-z0-9-]+\.workers\.dev' "$RUNNER_TEMP/thready-deploy.log")
           export WORKER_URL
           npx wrangler secret list --format json --config .wrangler-deploy.toml > "$RUNNER_TEMP/thready-secret-names.json"
