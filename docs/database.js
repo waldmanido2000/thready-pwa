@@ -16,11 +16,14 @@ function ready() {
 async function run(names,mode,work) {
   const db = await ready();
   return new Promise((resolve,reject) => {
-    const tx = db.transaction(names,mode);
+    const tx = db.transaction(mode === 'readwrite' ? [...new Set([...names,'meta'])] : names,mode);
     tx.oncomplete = () => resolve(value?.result);
     tx.onabort = () => reject(tx.error || new Error('Device storage operation failed.'));
     let value;
-    try { value = work(tx); }
+    try {
+      value = work(tx);
+      if (mode === 'readwrite') tx.objectStore('meta').put(crypto.randomUUID(),'writeStamp');
+    }
     catch (error) { tx.abort(); reject(error); }
   });
 }
@@ -67,7 +70,7 @@ export function settleOutbox(identity,id,failed) {
   });
 }
 
-export function exportDevice() {
+export function exportDevice(includeStamp = false) {
   return run(tables,'readonly',tx => {
     const capture = {};
     const reads = {
@@ -78,20 +81,26 @@ export function exportDevice() {
       contacts:tx.objectStore('contacts').getAll(),
       outbox:tx.objectStore('outbox').getAll()
     };
+    if (includeStamp) reads.stamp = tx.objectStore('meta').get('writeStamp');
     for (const [key,request] of Object.entries(reads)) request.onsuccess = () => { capture[key] = request.result; };
     return {result:capture};
   });
 }
 
-export function restoreDevice(data) {
+export function restoreDevice(data,{unlock,signIn} = {}) {
   return run(tables,'readwrite',tx => {
     const meta = tx.objectStore('meta');
     const current = meta.get('identity');
-    current.onsuccess = () => {
-      if (current.result && current.result.card.id !== data.identity.card.id) {
+    const locked = meta.get('locked');
+    locked.onsuccess = () => {
+      if ((current.result && current.result.card.id !== data.identity.card.id) ||
+          (locked.result && (locked.result.stamp !== unlock || locked.result.id !== data.identity.card.id))) {
         tx.abort();
         return;
       }
+      if (unlock && !locked.result) { tx.abort(); return; }
+      meta.delete('locked');
+      if (signIn) meta.put(signIn,'signIn');
       meta.put(data.identity,'identity');
       for (const key of ['favorites','failed']) {
         const list = meta.get(key);
@@ -107,6 +116,22 @@ export function restoreDevice(data) {
         }
       }
     };
+  });
+}
+
+export function lockDevice(id,stamp,vault) {
+  return run(tables,'readwrite',tx => {
+    const meta = tx.objectStore('meta');
+    const current = meta.get('identity');
+    const revision = meta.get('writeStamp');
+    const result = {result:false};
+    revision.onsuccess = () => {
+      if (current.result?.card.id !== id || revision.result !== stamp) return;
+      for (const name of tables) tx.objectStore(name).clear();
+      meta.put({id,stamp:crypto.randomUUID(),vault},'locked');
+      result.result = true;
+    };
+    return result;
   });
 }
 

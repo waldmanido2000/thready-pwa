@@ -1,4 +1,4 @@
-import {identity,isConnected,localActions,requestSync} from './client.js';
+import {identity,isConnected,localActions,requestSync,signInConfigured,signedOut} from './client.js';
 
 const screen = document.querySelector('#screen');
 const menu = document.querySelector('#menu');
@@ -10,6 +10,11 @@ const params = new URLSearchParams(location.hash.slice(1));
 let invite = params.get('contact') || '';
 let messageToOpen = new URLSearchParams(location.search).get('message') || '';
 let token = '';
+let passphraseSet = false;
+let locked = false;
+const sessionChannel = 'BroadcastChannel' in window ? new BroadcastChannel('thready-account-session') : null;
+sessionChannel?.addEventListener('message',() => location.reload());
+addEventListener('pageshow',event => { if (event.persisted) location.reload(); });
 
 let data = null;
 let lastConnection = {key:"",offline:false};
@@ -113,6 +118,8 @@ function password(label = tr('Passphrase'), creation = false) {
 async function init() {
   try {
     token = (await identity())?.card.id || '';
+    passphraseSet = Boolean(token) && await signInConfigured();
+    locked = !token && await signedOut();
     if (token) {
       await update(true);
       if (invite && invite !== token) addContact(invite);
@@ -133,6 +140,13 @@ function auth() {
   menuButton.hidden = false;
   showMenu(false);
   status('On this device');
+  if (locked) {
+    screen.className = '';
+    screen.replaceChildren(el('section',{class:'auth'},el('h1',{},tr('Sign in')),
+      el('p',{class:'hint'},tr('Enter your passphrase to unlock this device.')),
+      signInForm(false)));
+    return;
+  }
   const form = openForm(tr('Create your account'),tr('Create account'),[
     field(tr('Display name'),'name',{maxlength:60,autocomplete:'nickname',dir:'auto'})
   ],async fields => {
@@ -142,7 +156,44 @@ function auth() {
   screen.className = '';
   screen.replaceChildren(el('section',{class:'auth'},el('h1',{},tr('Create your account')),
     el('p',{class:'hint'},tr('Your identity and chat history live on this device.')),
-    form,button(tr('Load backup'),restoreDialog,'quiet')));
+    form,el('div',{class:'row'},button(tr('Sign in'),() => signInForm(),'quiet'),
+      button(tr('Load backup'),restoreDialog,'quiet'))));
+}
+
+function signInForm(modalForm = true) {
+  return openForm(tr('Sign in'),tr('Sign in'),[
+    locked ? null : field(tr('Thready ID'),'id',{dir:'ltr',maxlength:43,autocomplete:'username',autocapitalize:'none'}),
+    password(tr('Sign-in passphrase'))
+  ],async fields => {
+    await localActions.signIn((fields.id || '').trim(),fields.code);
+    sessionChannel?.postMessage('sign-in');
+    if (dialog.open) dialog.close();
+    await init();
+  },modalForm);
+}
+
+function signInSettings() {
+  openForm(tr('Set sign-in passphrase'),tr('Enable sign-in'),[
+    el('p',{class:'hint'},tr('Use this passphrase and your Thready ID to sign in on another device. Keep an encrypted backup to move your chats.')),
+    password(tr('Sign-in passphrase'),true),
+    field(tr('Confirm passphrase'),'confirm',{type:'password',maxlength:128,minlength:12,autocomplete:'new-password'})
+  ],async fields => {
+    if (fields.code !== fields.confirm) throw new Error('The passphrases do not match.');
+    await localActions.configureSignIn(fields.code);
+    passphraseSet = true;
+    tell(tr('Sign-in is ready.'));
+  });
+}
+
+function signOutDialog() {
+  openForm(tr('Sign out'),tr('Sign out'),[
+    el('p',{class:'hint'},tr('Your chats will be locked on this device until you sign in again.')),
+    password(tr('Sign-in passphrase'))
+  ],async fields => {
+    await localActions.signOut(fields.code);
+    sessionChannel?.postMessage('sign-out');
+    location.reload();
+  });
 }
 
 function index() {
@@ -346,7 +397,9 @@ function populateMenu() {
     [tr('Search text'),() => searchDialog('text')]);
   if (data) items.push([tr('Add contact'),addContact],[tr('Share my Thready ID'),showInvite],
     [tr('Backup'),backupDialog],[tr('Load backup'),restoreDialog],
-    [tr('Notifications'),notificationSettings],[tr('Delete account'),deleteAccountDialog]);
+    [tr('Notifications'),notificationSettings],
+    passphraseSet ? [tr('Sign out'),signOutDialog] : [tr('Set sign-in passphrase'),signInSettings],
+    [tr('Delete account'),deleteAccountDialog]);
 
   menu.replaceChildren(...items.map(([label,run]) => button(label,() => {
     showMenu(false);
@@ -697,7 +750,10 @@ async function showInvite() {
     el('div',{class:'row'},button(tr('Copy link'),async () => {
       try { await navigator.clipboard.writeText(link.href); tell(tr('Link copied.')); }
       catch { text.select(); }
-    },'primary'),navigator.share ? button(tr('Share'),() => navigator.share({title:'Thready PWA',url:link.href}).catch(() => {}),'quiet') : null)));
+    },'primary'),button(tr('Copy ID'),async () => {
+      try { await navigator.clipboard.writeText(id); tell(tr('Thready ID copied.')); }
+      catch { text.value = id; text.select(); }
+    },'quiet'),navigator.share ? button(tr('Share'),() => navigator.share({title:'Thready PWA',url:link.href}).catch(() => {}),'quiet') : null)));
 }
 
 function addContact(prefill = '') {

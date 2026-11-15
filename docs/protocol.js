@@ -115,6 +115,17 @@ async function backupKey(password,salt) {
   return crypto.subtle.deriveKey({name:'PBKDF2',hash:'SHA-256',salt,iterations:600000},key,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
 }
 
+export async function signInLookup(id,passphrase) {
+  if (!isId(id) || typeof passphrase !== 'string' || passphrase.length < 12 || passphrase.length > 128) {
+    throw new Error('Enter your Thready ID and passphrase.');
+  }
+  const password = await crypto.subtle.importKey('raw',bytes(passphrase),'PBKDF2',false,['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({
+    name:'PBKDF2',hash:'SHA-256',iterations:600000,salt:bytes('thready-sign-in-lookup-v1:' + id)
+  },password,256);
+  return b64(bits);
+}
+
 export async function encryptBackup(data,password) {
   if (typeof password !== 'string' || password.length < 12) throw new Error('Use a backup passphrase of at least 12 characters.');
   const salt = random(16), iv = random(12);

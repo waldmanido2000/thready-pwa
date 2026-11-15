@@ -1,5 +1,5 @@
-import {all,get,put,saveEvents,settleOutbox,exportDevice,restoreDevice,clearDevice} from './database.js';
-import {b64,unb64,checkedCard,createIdentity,seal,openEnvelope,isId,encryptBackup,decryptBackup,registration,verifyRegistration} from './protocol.js';
+import {all,get,put,saveEvents,settleOutbox,exportDevice,restoreDevice,lockDevice,clearDevice} from './database.js';
+import {b64,unb64,checkedCard,createIdentity,seal,openEnvelope,isId,encryptBackup,decryptBackup,registration,verifyRegistration,signInLookup} from './protocol.js';
 import {apply,replay} from './model.js';
 import {relay,register,storeEnvelopes} from './network.js';
 
@@ -10,12 +10,14 @@ let lastPull = 0;
 let writes = Promise.resolve();
 let lastView = '';
 let revision = 0;
-let deleting = false;
+let sessionChanging = false;
 
 export const isConnected = () => connected && navigator.onLine;
 export const identity = () => get('meta','identity');
+export const signInConfigured = async () => Boolean(await get('meta','signIn'));
+export const signedOut = async () => Boolean(await get('meta','locked'));
 export function requestSync(force = false) {
-  if (deleting) return Promise.resolve();
+  if (sessionChanging) return Promise.resolve();
   if (force) lastPull = 0;
   if (!pendingSync) pendingSync = sync().finally(() => { pendingSync = null; });
   return pendingSync;
@@ -69,12 +71,25 @@ async function state() {
   return {owner,model,events,favorites:favorites || [],outbox,failed:failed || []};
 }
 
+async function checkIdentity(owner,id = owner?.card?.id) {
+  if (!isId(id) || owner?.card?.id !== id || !isId(owner.token) || typeof owner.name !== 'string') {
+    throw new Error('Invalid backup.');
+  }
+  const {card} = await verifyRegistration(await registration(owner),owner.token);
+  const probe = {id:crypto.randomUUID(),author:card.id,clock:1,at:0,name:owner.name,action:'revive',fields:{}};
+  await openEnvelope(owner,{...await seal(owner,card,probe),sender:card});
+}
+
+function openForSignIn(capsule,passphrase) {
+  return decryptBackup(capsule,passphrase).catch(() => { throw new Error('That Thready ID and passphrase did not match.'); });
+}
+
 export const localActions = {
   async create(name) {
     return serialized(async () => {
       name = name.trim();
       if (!name || name.length > 60) throw new Error('Enter a display name.');
-      if (await identity()) throw new Error('This installation already has an identity.');
+      if (await identity() || await signedOut()) throw new Error('This installation already has an identity.');
       const owner = await createIdentity(name);
       await put('meta','identity',owner);
       if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
@@ -85,13 +100,15 @@ export const localActions = {
     return (await identity())?.card.id;
   },
   async contact(id,name) {
-    const owner = await identity();
-    if (!isId(id) || id === owner?.card.id) throw new Error('Enter a valid Thready ID.');
-    const localName = name.trim();
-    if (localName.length > 60) throw new Error('Enter a display name.');
-    const {card} = await relay('/contact?id=' + encodeURIComponent(id));
-    const verified = await checkedCard(card);
-    await put('contacts',id,{...verified,localName});
+    return serialized(async () => {
+      const owner = await identity();
+      if (!owner || !isId(id) || id === owner.card.id) throw new Error('Enter a valid Thready ID.');
+      const localName = name.trim();
+      if (localName.length > 60) throw new Error('Enter a display name.');
+      const {card} = await relay('/contact?id=' + encodeURIComponent(id));
+      const verified = await checkedCard(card);
+      await put('contacts',id,{...verified,localName});
+    });
   },
   async renameContact(id,name) {
     return serialized(async () => {
@@ -124,7 +141,7 @@ export const localActions = {
   },
   async change(action,fields) {
     return serialized(async () => {
-      if (deleting) throw new Error('Account deletion in progress.');
+      if (sessionChanging) throw new Error('An account operation is in progress.');
       const {owner,model,events,favorites} = await state();
       if (action === 'favorite') {
         const next = new Set(favorites);
@@ -169,6 +186,72 @@ export const localActions = {
       return result;
     });
   },
+  async configureSignIn(passphrase) {
+    return serialized(async () => {
+      const owner = await identity();
+      if (!owner) throw new Error('Create an identity first.');
+      if (passphrase.length < 12 || passphrase.length > 128) {
+        throw new Error('Use a sign-in passphrase of at least 12 characters.');
+      }
+      const id = owner.card.id;
+      const lookup = await signInLookup(id,passphrase);
+      let capsule = await encryptBackup(owner,passphrase);
+      await register(owner);
+      try { await relay('/sign-in/setup',owner,{lookup,capsule}); }
+      catch (error) {
+        if (error.status !== 409) throw error;
+        ({capsule} = await relay('/sign-in',null,{id,lookup}));
+        await checkIdentity(await openForSignIn(capsule,passphrase),id);
+      }
+      await put('meta','signIn',{capsule});
+    });
+  },
+  async signOut(passphrase) {
+    return serialized(async () => {
+      const owner = await identity();
+      const signIn = await get('meta','signIn');
+      if (!owner || !signIn) throw new Error('Set up sign-in first.');
+      sessionChanging = true;
+      try {
+        if (pendingSync) await pendingSync;
+        const check = await openForSignIn(signIn.capsule,passphrase);
+        if (check?.card?.id !== owner.card.id || check.token !== owner.token) {
+          throw new Error('That Thready ID and passphrase did not match.');
+        }
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const {stamp,...device} = await exportDevice(true);
+          const vault = await encryptBackup({device,signIn},passphrase);
+          if (await lockDevice(owner.card.id,stamp,vault)) {
+            connected = false;
+            registered = '';
+            return;
+          }
+        }
+        throw new Error('Device data changed during sign-out. Try again.');
+      } finally {
+        sessionChanging = false;
+      }
+    });
+  },
+  async signIn(id,passphrase) {
+    return serialized(async () => {
+      if (await identity()) throw new Error('Sign out before signing in again.');
+      const locked = await get('meta','locked');
+      if (locked) {
+        const {device,signIn} = await openForSignIn(locked.vault,passphrase);
+        await checkIdentity(device.identity,locked.id);
+        await restoreDevice(device,{unlock:locked.stamp,signIn});
+      } else {
+        const lookup = await signInLookup(id,passphrase);
+        const {capsule} = await relay('/sign-in',null,{id,lookup});
+        const owner = await openForSignIn(capsule,passphrase);
+        await checkIdentity(owner,id);
+        await restoreDevice({identity:owner,events:[],contacts:[],outbox:[]},{signIn:{capsule}});
+        if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
+      }
+      void requestSync(true);
+    });
+  },
   async backup(passphrase) {
     return encryptBackup(await exportDevice(),passphrase);
   },
@@ -180,10 +263,7 @@ export const localActions = {
           ![backup.contacts,backup.events,backup.outbox].every(Array.isArray)) throw new Error('Invalid backup.');
       const current = await identity();
       if (current && current.card.id !== owner.card.id) throw new Error('Use a fresh installation to restore another identity.');
-      const {card} = await verifyRegistration(await registration(owner),owner.token);
-      const probe = {id:crypto.randomUUID(),author:card.id,clock:1,at:0,name:owner.name,action:'revive',fields:{}};
-      // Check the stored encryption key as well as the signing key before committing the import.
-      await openEnvelope(owner,{...await seal(owner,card,probe),sender:card});
+      await checkIdentity(owner);
       await restoreDevice(backup);
       void requestSync(true);
     });
@@ -191,7 +271,7 @@ export const localActions = {
   async deleteEverywhere() {
     return serialized(async () => {
       const owner = await identity();
-      deleting = true;
+      sessionChanging = true;
       try {
         if (pendingSync) await pendingSync;
         if (!owner) return;
@@ -202,7 +282,7 @@ export const localActions = {
         registered = '';
         connected = false;
       } finally {
-        deleting = false;
+        sessionChanging = false;
       }
     });
   },
