@@ -8,6 +8,13 @@ const connection = document.querySelector('#connection');
 const toast = document.querySelector('#toast');
 const params = new URLSearchParams(location.hash.slice(1));
 let invite = params.get('contact') || '';
+let signupInvite = params.get('invite') || '';
+if (signupInvite) {
+  params.delete('invite');
+  history.replaceState(history.state,'',location.pathname + location.search + (params.size ? '#' + params : ''));
+}
+let invitationRequired = null;
+let admin = false;
 let messageToOpen = new URLSearchParams(location.search).get('message') || '';
 let token = '';
 let passphraseSet = false;
@@ -122,11 +129,16 @@ async function init() {
     locked = !token && await signedOut();
     if (token) {
       await update(true);
+      if (signupInvite) redeemInvitationDialog();
       if (invite && invite !== token) addContact(invite);
       void refresh(true);
       return;
     }
     auth();
+    if (!locked) {
+      invitationRequired = await localActions.invitationRequired().catch(() => null);
+      if (!token) auth();
+    }
   } catch (error) {
     status('Offline',true);
     screen.replaceChildren(el('div',{class:'auth'},el('h2',{},tr('Thready is unavailable')),
@@ -148,9 +160,14 @@ function auth() {
     return;
   }
   const form = openForm(tr('Create your account'),tr('Create account'),[
-    field(tr('Display name'),'name',{maxlength:60,autocomplete:'nickname',dir:'auto'})
+    field(tr('Display name'),'name',{maxlength:60,autocomplete:'nickname',dir:'auto'},screen.querySelector('[name=name]')?.value || ''),
+    invitationRequired === false && !signupInvite ? null :
+      field(tr('One-time invitation link'),'invitation',{
+        required:invitationRequired === true,dir:'ltr',maxlength:512,autocapitalize:'none',autocomplete:'off'
+      },screen.querySelector('[name=invitation]')?.value || signupInvite)
   ],async fields => {
-    await localActions.create(fields.name);
+    await localActions.create(fields.name,invitationCode(fields.invitation),invitationRequired !== false);
+    signupInvite = '';
     await init();
   },false);
   screen.className = '';
@@ -323,6 +340,7 @@ async function refresh(force = false) {
   refreshing = true;
   try {
     await requestSync(force);
+    admin = isConnected() && await localActions.canInvite().catch(() => false);
     if (token) await update();
   } catch (error) {
     tell(errorText(error.message));
@@ -400,6 +418,7 @@ function populateMenu() {
     [tr('Notifications'),notificationSettings],
     passphraseSet ? [tr('Sign out'),signOutDialog] : [tr('Set sign-in passphrase'),signInSettings],
     [tr('Delete account'),deleteAccountDialog]);
+  if (data && admin) items.splice(1,0,[tr('Invite someone'),createInvitationDialog]);
 
   menu.replaceChildren(...items.map(([label,run]) => button(label,() => {
     showMenu(false);
@@ -754,6 +773,42 @@ async function showInvite() {
       try { await navigator.clipboard.writeText(id); tell(tr('Thready ID copied.')); }
       catch { text.value = id; text.select(); }
     },'quiet'),navigator.share ? button(tr('Share'),() => navigator.share({title:'Thready PWA',url:link.href}).catch(() => {}),'quiet') : null)));
+}
+
+function invitationCode(value = '') {
+  const text = value.trim();
+  try {
+    return new URLSearchParams(new URL(text).hash.slice(1)).get('invite') || text;
+  } catch {
+    return text;
+  }
+}
+
+function redeemInvitationDialog() {
+  openForm(tr('Use invitation'),tr('Use invitation'),[
+    field(tr('One-time invitation link'),'invitation',{dir:'ltr',autocomplete:'off'},signupInvite)
+  ],async fields => {
+    await localActions.redeemInvitation(invitationCode(fields.invitation));
+    signupInvite = '';
+    await refresh(true);
+    tell(tr('Invitation accepted.'));
+  });
+}
+
+function createInvitationDialog() {
+  openForm(tr('Invite someone'),tr('Create invite link'),[
+    el('p',{class:'hint'},tr('This link can create one account and expires in seven days. Share it privately.'))
+  ],async () => {
+    const code = await localActions.createInvitation();
+    const link = new URL(location.pathname,location.origin);
+    link.hash = new URLSearchParams({invite:code}).toString();
+    const input = el('input',{type:'text',value:link.href,readonly:true,dir:'ltr','aria-label':tr('One-time invitation link')});
+    modal(tr('One-time invitation link'),el('div',{class:'form'},input,
+      el('div',{class:'row'},button(tr('Copy link'),async () => {
+        try { await navigator.clipboard.writeText(link.href); tell(tr('Link copied.')); }
+        catch { input.select(); }
+      },'primary'),navigator.share ? button(tr('Share'),() => navigator.share({title:'Thready PWA',url:link.href}).catch(() => {}),'quiet') : null)));
+  });
 }
 
 function addContact(prefill = '') {

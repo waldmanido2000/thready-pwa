@@ -25,8 +25,9 @@ export async function relay(path,identity,body) {
   }
 }
 
-export async function register(identity) {
-  return relay('/register',identity,await registration(identity));
+export async function register(identity,invitation) {
+  const proof = await registration(identity);
+  return relay('/register',identity,{...proof,invitation});
 }
 
 export async function storeEnvelopes(identity,envelopes) {

@@ -85,19 +85,44 @@ function openForSignIn(capsule,passphrase) {
 }
 
 export const localActions = {
-  async create(name) {
+  async create(name,invitation,requireOnline) {
     return serialized(async () => {
       name = name.trim();
       if (!name || name.length > 60) throw new Error('Enter a display name.');
       if (await identity() || await signedOut()) throw new Error('This installation already has an identity.');
-      const owner = await createIdentity(name);
-      await put('meta','identity',owner);
+      if (invitation && !isId(invitation)) throw new Error('Enter a valid invitation link.');
+      let owner = (await get('meta','pendingRegistration'))?.owner;
+      if (!owner) {
+        owner = await createIdentity(name);
+        await put('meta','pendingRegistration',{owner});
+      }
+      if (invitation || requireOnline) {
+        await register(owner,invitation || undefined);
+        registered = owner.card.id;
+      }
+      await put('meta','identity',{...owner,name});
+      await put('meta','pendingRegistration',null);
       if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
       void requestSync(true);
     });
   },
   async getId() {
     return (await identity())?.card.id;
+  },
+  async invitationRequired() {
+    return (await relay('/invitations/status')).required;
+  },
+  async canInvite() {
+    const owner = await identity();
+    return Boolean(owner && (await relay('/invitations/admin',owner)).allowed);
+  },
+  async createInvitation() {
+    const {invitation} = await relay('/invitations',await identity(),{});
+    return invitation;
+  },
+  async redeemInvitation(invitation) {
+    if (!isId(invitation)) throw new Error('Enter a valid invitation link.');
+    await register(await identity(),invitation);
   },
   async contact(id,name) {
     return serialized(async () => {

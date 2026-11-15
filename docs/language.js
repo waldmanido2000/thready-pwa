@@ -1,6 +1,16 @@
 'use strict';
 
 const hebrew = {
+  "Invite someone":"הזמנת משתמש",
+  "Use invitation":"מימוש הזמנה",
+  "Create invite link":"יצירת קישור הזמנה",
+  "One-time invitation link":"קישור הזמנה חד־פעמי",
+  "This link can create one account and expires in seven days. Share it privately.":"הקישור מאפשר ליצור חשבון אחד ותקף לשבעה ימים. שתפו אותו באופן פרטי.",
+  "Enter a valid invitation link.":"הזינו קישור הזמנה תקין.",
+  "An invitation is required to create a Thready account.":"כדי ליצור חשבון ב־Thready נדרשת הזמנה.",
+  "This invitation has expired or was already used.":"תוקף ההזמנה פג או שכבר השתמשו בה.",
+  "Only the Thready admin can create invitations.":"רק מנהל Thready יכול ליצור הזמנות.",
+  "Invitation accepted.":"ההזמנה מומשה.",
   "Test notification":"בדיקת התראה",
   "Test sent. Check this browser’s system notifications.":"נשלחה התראת בדיקה. בדקו את התראות המערכת של הדפדפן הזה.",
   "Enable notifications in this browser before testing.":"יש להפעיל התראות בדפדפן הזה לפני הבדיקה.",
