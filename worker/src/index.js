@@ -76,6 +76,29 @@ async function register(request,env) {
   return {id};
 }
 
+async function setSignIn(request,env,account) {
+  const {lookup,capsule} = await readJson(request,8192);
+  let file;
+  try { file = JSON.parse(capsule); }
+  catch { throw new HttpError(400,'Invalid sign-in package.'); }
+  check(isId(lookup) && file?.format === 'thready-pwa-v1' && encoded(file.salt,22,22) &&
+    encoded(file.iv,16,16) && encoded(file.body,22,7000),400,'Invalid sign-in package.');
+  const result = await env.DB.prepare(`INSERT OR IGNORE INTO sign_in (account_id,lookup_hash,sealed_identity)
+    SELECT id,?,? FROM accounts WHERE id=? AND deleted=0`).bind(await digest(lookup),capsule,account.id).run();
+  check(result.meta.changes === 1,409,'A sign-in passphrase is already set for this account.');
+  return {ok:true};
+}
+
+async function recoverSignIn(request,env) {
+  const {id,lookup} = await readJson(request,512);
+  check(isId(id) && isId(lookup),400,'Enter your Thready ID and passphrase.');
+  const row = await env.DB.prepare(`SELECT sealed_identity AS capsule FROM sign_in
+    JOIN accounts ON accounts.id=sign_in.account_id
+    WHERE account_id=? AND lookup_hash=? AND deleted=0`).bind(id,await digest(lookup)).first();
+  check(row,401,'That Thready ID and passphrase did not match.');
+  return row;
+}
+
 async function contact(url,env) {
   const id = url.searchParams.get('id');
   check(isId(id),400,'Enter a valid Thready ID.');
@@ -198,6 +221,7 @@ async function deleteAccount(env,account) {
   await env.DB.batch([
     env.DB.prepare("UPDATE accounts SET deleted=1,card='' WHERE id=?").bind(account.id),
     env.DB.prepare('DELETE FROM subscriptions WHERE account_id=?').bind(account.id),
+    env.DB.prepare('DELETE FROM sign_in WHERE account_id=?').bind(account.id),
     env.DB.prepare('DELETE FROM delivery WHERE recipient_id=? OR sender_id=?').bind(account.id,account.id)
   ]);
   return {ok:true};
@@ -209,6 +233,8 @@ async function route(request,env,ctx) {
   switch (action) {
     case 'GET /': return {service:'Thready delivery',version:1};
     case 'POST /register': return register(request,env);
+    case 'POST /sign-in/setup': return setSignIn(request,env,await authenticate(request,env));
+    case 'POST /sign-in': return recoverSignIn(request,env);
     case 'GET /contact': return contact(url,env);
     case 'GET /push-key':
       check(env.VAPID_PUBLIC_KEY,503,'Notifications are not configured.');
